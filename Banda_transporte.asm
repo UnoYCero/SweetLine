@@ -1,100 +1,120 @@
-; ==============================================================
-;  FILLING-BOT v0.3   –   Esqueleto con define-map oficial
-;  PIC16F877A  •  XT 4 MHz
-;  Autor :  LUCA ⚡
-; ==============================================================
-
+; ****************************************************************************************
+;  Sweet-Line – PIC16F877A  @ 4 MHz    MAIN v2.2  (08-may-2025)
+; ****************************************************************************************
             LIST      P=16F877A
-            #include <P16F877A.INC>
-            __CONFIG _FOSC_XT & _WDTE_OFF & _PWRTE_ON & _BOREN_OFF & \
-                     _LVP_OFF & _CPD_OFF & _WRT_OFF & _CP_OFF
+            #include  <P16F877A.INC>
 
-; ───────────────  ÁREA DE DATOS  ───────────────────────────────
-            CBLOCK  0x20
-TEMP
-ENTRADA1         ; Bits RA5-0 + RE1-0 (ya ensamblados)
-ENTRADA2         ; Bits RB7-0
-STATE
-FLAGS
-TMR0_TMP
-            ENDC
+; — LIBRERÍAS —
+            INCLUDE   "RETARDOS.INC"
+            INCLUDE   "LCD_4BIT.INC"          ; ¡¡OJO AJUSTAR RS/E/RW a pines libres
+            INCLUDE   "UNIPOLAR_STEPPER.INC"  ; Multipuerto
 
-; ───────────────  ETIQUETAS  DE  ENTRADA  ─────────────────────
-; ENTRADA1 (MSB…LSB)
-#define S_Pieza         ENTRADA1,7   ; RE1
-#define S_limiteM1_1    ENTRADA1,6   ; RE0
-#define S_limiteM1_2    ENTRADA1,5   ; RA5
-#define S_limiteM2      ENTRADA1,4   ; RA4
-#define S_limiteM3      ENTRADA1,3   ; RA3
-#define Celda           ENTRADA1,2   ; RA2 (comparador de carga)
-#define NI1             ENTRADA1,1   ; RA1 (no usada)
-#define NI2             ENTRADA1,0   ; RA0 (no usada)
+            __CONFIG  _FOSC_XT & _WDTE_OFF & _PWRTE_ON & _BOREN_OFF & _LVP_OFF & _CPD_OFF & _WRT_OFF & _CP_OFF
 
-; ENTRADA2  (HMI)
-#define STOP            ENTRADA2,7   ; RB7
-#define START           ENTRADA2,6   ; RB6
-#define S0              ENTRADA2,5   ; RB5  (INICIO)
-#define S1              ENTRADA2,4   ; RB4
-#define AUTO            ENTRADA2,3   ; RB3
-#define MAN             ENTRADA2,2   ; RB2
-#define NI3             ENTRADA2,1   ; RB1
-#define NI4             ENTRADA2,0   ; RB0
+; *****************************************  RAM (Bank0)  *****************************************
+;  0x20-0x22 = Paso,Contador,Direccion (librería stepper)
+CBLOCK  0x24
+    TEMP
+    ENTRADA1            ; bits: 7-NI,6-pieza,5-M1.1,4-M1.2,3-M2,2-M3,1-CEL1,0-CEL2
+    ENTRADA2            ; bits: 7-6-NI,5-START,4-RESET,3-STOP,2-PARO,1-AUTO/MAN,0-DIR
+    STATE
+    FLAGS
+ENDC
 
-; ───────────────  ETIQUETAS  DE  SALIDA  ──────────────────────
-; PORTD → Motores 1 y 2
-#define M1_1_OUT        PORTD,7
-#define M1_2_OUT        PORTD,6
-#define M1_3_OUT        PORTD,5
-#define M1_4_OUT        PORTD,4
-#define M2_1_OUT        PORTD,3
-#define M2_2_OUT        PORTD,2
-#define M2_3_OUT        PORTD,1
-#define M2_4_OUT        PORTD,0
+; *****************************************  FLAGS  *****************************************
+#define fAUTO   0
+#define fMAN    1
 
-; PORTC → Motor 3 + LCD
-#define M3_1_OUT        PORTC,7
-#define M3_2_OUT        PORTC,6
-#define M3_3_OUT        PORTC,5
-#define M3_4_OUT        PORTC,4
-; RC3-0 = LCD (RC3=LCD1.1, etc.)
+; *****************************************  ENTRADAS 1  (SEÑALES) *****************************************
+#define S_Pieza      ENTRADA1,6   ; RB0
+#define LIM_M1_1     ENTRADA1,5   ; RA5
+#define LIM_M1_2     ENTRADA1,4   ; RA4
+#define LIM_M2       ENTRADA1,3   ; RA3
+#define LIM_M3       ENTRADA1,2   ; RE2
+#define CELDA_1      ENTRADA1,1   ; RE1
+#define CELDA_2      ENTRADA1,0   ; RE0
 
-; ───────────────  RESET VECTOR  ───────────────────────────────
+; *****************************************  ENTRADAS 2  (HMI) *****************************************
+#define START_M1     ENTRADA2,5   ; RB6
+#define RESET_M2     ENTRADA2,4   ; RB5
+#define STOP_M3      ENTRADA2,3   ; RB4
+#define PARO_SIS     ENTRADA2,2   ; RB3
+#define MODO_SEL     ENTRADA2,1   ; RB2 (1=auto / 0=manual)
+#define DIR_SEL      ENTRADA2,0   ; RB1 (Horario / Anti)
+
+; *****************************************  SALIDAS (INDICADORES) *****************************************
+#define BUZZER        PORTB,7     ; RB7  (activo)
+#define LED_VERDE     PORTA,2     ; RA2
+#define LED_AMARILLO  PORTA,1     ; RA1
+#define LED_ROJO      PORTA,0     ; RA0
+
+; *****************************************  VECTORES  *****************************************
             ORG   0x0000
-            GOTO  Init
+            goto  Init
             ORG   0x0004
 ISR         RETFIE
 
-; ───────────────  INICIALIZACIÓN  ─────────────────────────────
+; *****************************************  INICIALIZACIÓN  *****************************************
 Init
-            bsf     STATUS,RP0          ; Banco 1
-            movlw   b'00111111'         ; RA0-5 entradas
+            ;  Configura TRIS 
+            bsf     STATUS,RP0                 ; BANK1
+            movlw   b'00111000'                ; RA5-3 IN, RA2-0 OUT
             movwf   TRISA
-            movlw   b'00000011'         ; RE0-1 entradas
+            movlw   b'00000111'                ; RE2-0 IN (tres señales)
             movwf   TRISE
-            movlw   0xFF
-            movwf   TRISB               ; RB0-7 entradas
-            clrf    TRISC               ; Salidas (LCD+M3)
-            clrf    TRISD               ; Salidas (M1 & M2)
+            movlw   b'01111111'                ; RB7 OUT, RB6-1 IN, RB0 IN
+            movwf   TRISB
+            clrf    TRISC                      ; salidas (LCD nibble bajo + M3)
+            clrf    TRISD                      ; salidas (M1, M2)
+            bcf     STATUS,RP0                 ; BANK0
+            clrf    PORTA
+            clrf    PORTB
+            clrf    PORTC
+            clrf    PORTD
+            clrf    PORTE
+            clrf    FLAGS
+            clrf    STATE
 
-            ; Comparadores off / analógico off
+            ;  Comparadores / ADC off 
             movlw   b'00000111'
             movwf   CMCON
             movlw   b'00000110'
             movwf   ADCON1
-            bcf     STATUS,RP0          ; Banco 0
-            clrf    PORTC
-            clrf    PORTD
-            clrf    STATE
-            clrf    FLAGS
 
-; ───────────────  LAZO PRINCIPAL  ─────────────────────────────
+            ; LCD banner
+            call    LCD_Inicializa
+            call    LCD_Borra
+            call    LCD_Linea1
+            movlw   "S"
+            call    LCD_Caracter
+            movlw   "W"
+            call    LCD_Caracter
+            movlw   "E"
+            call    LCD_Caracter
+            movlw   "E"
+            call    LCD_Caracter
+            movlw   "T"
+            call    LCD_Caracter
+            movlw   "-"
+            call    LCD_Caracter
+            movlw   "L"
+            call    LCD_Caracter
+            movlw   "I"
+            call    LCD_Caracter
+            movlw   "N"
+            call    LCD_Caracter
+            movlw   "E"
+            call    LCD_Caracter
+            call    Retardo_200ms
+
+; *****************************************  BUCLE PRINCIPAL  *****************************************
 MainLoop
-            call    ActEntradas         ; Refresca ENTRADA1/2
+            call    ActEntradas
             movf    STATE,W
             call    JumpTable
             goto    MainLoop
 
-; ───────────────  TABLA DE SALTOS  ────────────────────────────
+; *****************************************  TABLA INDEXADA  *****************************************
 JumpTable
             addwf   PCL,F
             RETLW   HIGH St0_Espera
@@ -108,86 +128,90 @@ JumpTable
             RETLW   HIGH St4_Banda
             RETLW   LOW  St4_Banda
 
-; ───────────────  HANDLERS  ───────────────────────────────────
+; *****************************************  HANDLERS  *****************************************
 St0_Espera
-            btfsc   STOP            ; STOP activo → quieto
+            btfsc   PARO_SIS
             goto    St0_Espera
-            btfss   START           ; Espera START
+            btfss   START_M1
             goto    St0_Espera
-            btfsc   AUTO
-            bsf     FLAGS,0         ; fAUTO
-            btfsc   MAN
-            bsf     FLAGS,1         ; fMAN
+            btfsc   MODO_SEL
+            bsf     FLAGS,fAUTO
+            btfss   MODO_SEL
+            bsf     FLAGS,fMAN
+            call    LCD_Borra
+            call    LCD_Linea1
+            movlw   "H"
+            call    LCD_Caracter
+            movlw   "O"
+            call    LCD_Caracter
+            movlw   "M"
+            call    LCD_Caracter
+            movlw   "E"
+            call    LCD_Caracter
             movlw   1
             movwf   STATE
             return
 
-St1_Home                     ; Condiciones iniciales / homing
-            ; TODO: usa S_limiteM1_*, M2, M3 para “home-seek”
+; ***************************************** HOMING *****************************************
+St1_Home
+            ; Implementa búsqueda de LIM_
+            call    Retardo_1s
             movlw   2
             movwf   STATE
             return
 
-St2_Vaciado                  ; Llenado / vaciado tolva
-WaitCeldaOK
-            btfss   Celda           ; Celda (RA2) alto ⇒ listo
-            goto    WaitCeldaOK
-            call    MotorTolva_Open
+; ***************************************** VACÍO / LLENADO *****************************************
+St2_Vaciado
+            bcf     Direccion,0          ; CW
+            call    M1_Gira_45           ; Tolva abre
 WaitLleno
-            btfss   Celda           ; Cuando vuelva bajo ⇒ lleno
+            call    ActEntradas
+            btfss   CELDA_1              ; espera comparador 1
             goto    WaitLleno
-            call    MotorTolva_Close
+            bsf     Direccion,0          ; CCW
+            call    M1_Gira_45           ; Tolva cierra
             movlw   3
             movwf   STATE
             return
 
+; ***************************************** CARRUSEL *****************************************
 St3_Carrusel
-            btfss   S_Pieza         ; Espera RE1=1 pieza presente
-            goto    St3_Carrusel
-            call    MotorCarrusel_Step
+            bsf     Direccion,0          ; CCW
+            call    M2_Gira_90
             movlw   4
             movwf   STATE
             return
 
+; ***************************************** BANDA *****************************************
 St4_Banda
-            call    MotorBanda_Move
-            movlw   0              ; Reinicia ciclo
+            bcf     Direccion,0          ; CW
+            call    M3_Gira_90
+            movlw   0
             movwf   STATE
             return
 
-; ──────────  SUBRUTINAS DE MOTORES  (vacías)  ─────────────────
-MotorTolva_Open
-            ; TODO: secuencia de RD7-4 (CW)
-            return
-MotorTolva_Close
-            ; TODO: secuencia de RD7-4 (CCW)
-            return
-MotorCarrusel_Step
-            ; TODO: RD3-0 avance 90 °
-            return
-MotorBanda_Move
-            ; TODO: RC7-4 pasos o PWM
-            return
-
-; ───────────────  ENTRADAS → SNAPSHOT  ───────────────────────
+; *****************************************  ACTUALIZAR ENTRADAS  *****************************************
 ActEntradas
-            bcf     STATUS,C
+            ;  ENTRADA1 (RA5-3 + RE2-0 + RB0) 
+            clrf    ENTRADA1
+            ; RA5-3 → bits6-4
             movf    PORTA,W
+            andlw   b'00111000'          ; RA5-3
+            rlf     WREG,W               ; desplaza 1 → RA5→6, RA4→5, RA3→4
             movwf   ENTRADA1
+            ; RE2-0 → bits3-1
             movf    PORTE,W
-            movwf   TEMP
-            rlf     TEMP,F
-            rlf     TEMP,F
-            rlf     TEMP,F
-            rlf     TEMP,F
-            rlf     TEMP,F
-            rlf     TEMP,W
-            iorwf   ENTRADA1,F       ; RE1-0 se vuelven bits 7-6
+            andlw   b'00000111'          ; RE2-0
+            rlf     WREG,W               ; RE2→3, RE1→2, RE0→1
+            iorwf   ENTRADA1,F
+            ; RB0  → bit0
+            btfsc   PORTB,0
+            bsf     ENTRADA1,0
+
+            ;  ENTRADA2  (RB6-1) 
             movf    PORTB,W
+            andlw   b'01111110'          ; limpia RB7 y RB0
             movwf   ENTRADA2
             return
 
-; ───────────────  RETARDOS  ───────────────────────────────────
-            INCLUDE <RETARDOS.INC>
-; =============================================================
             END
